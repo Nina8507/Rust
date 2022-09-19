@@ -22,7 +22,14 @@ pub enum LexerError {
     UnknownSymbol {
         symbol: String,
     },
+
+    #[error("Cannot create numeric literial due to invalid character {raw:?}")]
+    NumericLiteralInvalidChar{
+        raw: String,
+    },
 }
+
+pub type Token = TokenType;
  
 #[derive(Debug)]
 pub struct Punctuation {
@@ -30,7 +37,12 @@ pub struct Punctuation {
     pub kind: PunctuationKind,
 }
 
-pub type Token = TokenType;
+#[derive(Debug)]
+pub enum NumericHint {
+    Integer, 
+    FloatingPoint,
+}
+
 
 #[derive(Debug)]
 pub enum TokenType {
@@ -51,6 +63,7 @@ pub enum TokenType {
 
     //Comma, colon, Left paran, right paran, main, left braces and right braces
     Punctuation{raw: char, kind:PunctuationKind},
+    Numeric{raw : String, hint:NumericHint},
     EOT,
     Error,
 
@@ -89,7 +102,7 @@ pub struct Lexer<'a> {
     
 }
 
-impl<'a_, 'a> Lexer<'a_> {
+impl<'a> Lexer<'a> {
      pub fn new(chars: &'a str) -> Lexer<'a> {
         Lexer {
             current_line: 1,
@@ -97,14 +110,15 @@ impl<'a_, 'a> Lexer<'a_> {
 
             codepoint_offset: 0,
             chars: chars.chars().peekable(),
-            balancing_state: std::collections::HashMap::new(),
+            balancing_state: std::collections::HashMap::new()
         }
     } 
 
 fn map_balance(c: &char) -> char {
     match c {
             '{' => '}',   
-            '(' => ')',      
+            '(' => ')',     
+            _ => {*c} 
     }
 }
 
@@ -132,22 +146,13 @@ fn pop_symbol (&mut self, c: &char) -> Result<BalancingDepthType, LexerError> {
     else {Err(LexerError::MissingBalancedSymbol { symbol: *c, open: Lexer::map_balance(&c) })} 
 }
 
-fn transform_to_type (&mut self, c: char) -> Result<TokenType, LexerError> {
-        match c {
-            '(' => Ok(TokenType::Punctuation {raw: c, kind: PunctuationKind::Open(self.push_symbol(&c))}),
-            ')' => Ok(TokenType:: Punctuation {raw: c, kind: PunctuationKind::Close(self.pop_symbol(&c)?)}),
-            _ => Err(LexerError::UnknownSymbol { symbol: c.to_string() })
-        }
-    }
-}
-
 fn consume_char(&mut self) -> Option<char>{
     match self.chars.next() {
         Some(c) => {
             self.current_line += 1;
             if c == '\n' {
                 self.current_line += 1;
-                self.current_column = 1;
+                self.current_colomn = 1;
             } 
             self.codepoint_offset += 1;
 
@@ -157,6 +162,72 @@ fn consume_char(&mut self) -> Option<char>{
         None => None
     }
 } 
+
+fn consume_digit(&mut self, raw: &String, radix: u32) -> Result<char, LexerError> {
+    match self.chars.next() {
+        None => {
+            Err(LexerError::NumericLiteralInvalidChar { raw: raw.to_string() })
+        },
+        Some(c) if !c.is_digit(radix) => {
+            Err(LexerError::NumericLiteralInvalidChar { raw: raw.to_string() })
+        },
+        Some(c) => Ok(c) 
+    }
+}
+
+
+fn parse_number(&mut self, start:char) -> Result<TokenType, LexerError> {
+    // 29 simple type 
+    // .1 floting point number
+    // 1.1 
+    // le+1111 exponantionals 
+
+    let mut seen_dot = false;
+    // for exponantional signes 
+    let mut seen_exp = false;
+    let mut num = start.to_string();
+    let radix = 10;
+
+    if start == '.'{
+        num.push(self.consume_digit(&num, radix)?); 
+        seen_dot = true;
+    }
+
+    loop {
+        match self.chars.peek() {
+            Some(c) if *c == '.' && !!seen_dot && !seen_exp => {
+                num.push(*c);
+                self.consume_char();
+                seen_dot = true;
+            },
+            Some(c) if (*c == 'e' || *c == 'E') && seen_exp => {
+                num.push(*c);
+                self.consume_char();
+                seen_exp = true;
+
+                match self.chars.peek() {
+                    Some(c) if *c == '+' || *c == '-' => {
+                        num.push(*c);
+                        self.consume_char();
+                    },
+                    _ => {}
+                }
+            },
+            Some(c) if c.is_digit(radix) => {
+                num.push(*c); 
+                self.consume_char();
+            }, 
+            Some(c) if c.is_ascii_alphabetic() || c.is_digit(radix) => {
+                // for when radix != 10
+                num.push(*c); // for errors 
+                return Err(LexerError::NumericLiteralInvalidChar { raw: num });
+            },
+            _ => {
+                break Ok(TokenType::Numeric { raw: num, hint: if seen_dot || seen_exp {NumericHint::FloatingPoint} else {NumericHint::Integer} })
+            }
+        }
+    }
+}
 
 fn skip_whitespace(&mut self) {
     while let Some(c) = self.chars.peek()  {
@@ -174,5 +245,15 @@ pub fn next_token (&mut self) -> Result<TokenType, LexerError> {
         self.transform_to_type(c)
     } else {
         Ok(TokenType::EOT)
+    }
+}
+
+fn transform_to_type (&mut self, c: char) -> Result<TokenType, LexerError> {
+        match c {
+            '(' | '{' => Ok(TokenType::Punctuation {raw: c, kind: PunctuationKind::Open(self.push_symbol(&c))}),
+            ')' | '}' => Ok(TokenType:: Punctuation {raw: c, kind: PunctuationKind::Close(self.pop_symbol(&c)?)}),
+            '0' ..= '9' | '.' => self.parse_number(c),
+            _ => Err(LexerError::UnknownSymbol { symbol: c.to_string() })
+        }
     }
 }
